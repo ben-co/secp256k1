@@ -15,10 +15,16 @@
  * TODO: Determine this at configure time. */
 #define ALIGNMENT 16
 
-static secp256k1_scratch* secp256k1_scratch_create(const secp256k1_callback* error_callback, size_t max_size) {
+static secp256k1_scratch* secp256k1_scratch_create(const secp256k1_callback* error_callback, size_t init_size, size_t max_size) {
     secp256k1_scratch* ret = (secp256k1_scratch*)checked_malloc(error_callback, sizeof(*ret));
     if (ret != NULL) {
-        memset(ret, 0, sizeof(*ret));
+        ret->data = checked_malloc(error_callback, init_size);
+        if (ret->data == NULL) {
+            free (ret);
+            return NULL;
+        }
+        ret->offset = 0;
+        ret->init_size = init_size;
         ret->max_size = max_size;
         ret->error_callback = error_callback;
     }
@@ -27,60 +33,45 @@ static secp256k1_scratch* secp256k1_scratch_create(const secp256k1_callback* err
 
 static void secp256k1_scratch_destroy(secp256k1_scratch* scratch) {
     if (scratch != NULL) {
-        VERIFY_CHECK(scratch->frame == 0);
+        free(scratch->data);
         free(scratch);
     }
 }
 
 static size_t secp256k1_scratch_max_allocation(const secp256k1_scratch* scratch, size_t objects) {
-    size_t i = 0;
-    size_t allocated = 0;
-    for (i = 0; i < scratch->frame; i++) {
-        allocated += scratch->frame_size[i];
-    }
-    if (scratch->max_size - allocated <= objects * ALIGNMENT) {
+    if (scratch->max_size <= objects * ALIGNMENT) {
         return 0;
     }
-    return scratch->max_size - allocated - objects * ALIGNMENT;
+    return scratch->max_size - objects * ALIGNMENT;
 }
 
-static int secp256k1_scratch_allocate_frame(secp256k1_scratch* scratch, size_t n, size_t objects) {
-    VERIFY_CHECK(scratch->frame < SECP256K1_SCRATCH_MAX_FRAMES);
-
-    if (n <= secp256k1_scratch_max_allocation(scratch, objects)) {
-        n += objects * ALIGNMENT;
-        scratch->data[scratch->frame] = checked_malloc(scratch->error_callback, n);
-        if (scratch->data[scratch->frame] == NULL) {
+static int secp256k1_scratch_resize(secp256k1_scratch* scratch, size_t n, size_t objects) {
+    n += objects * ALIGNMENT;
+    if (n > scratch->init_size && n <= scratch->max_size) {
+        void *tmp = checked_realloc(scratch->error_callback, scratch->data, n);
+        if (tmp == NULL) {
             return 0;
         }
-        scratch->frame_size[scratch->frame] = n;
-        scratch->offset[scratch->frame] = 0;
-        scratch->frame++;
-        return 1;
-    } else {
-        return 0;
+        scratch->init_size = n;
+        scratch->data = tmp;
     }
-}
-
-static void secp256k1_scratch_deallocate_frame(secp256k1_scratch* scratch) {
-    VERIFY_CHECK(scratch->frame > 0);
-    scratch->frame -= 1;
-    free(scratch->data[scratch->frame]);
+    return n <= scratch->max_size;
 }
 
 static void *secp256k1_scratch_alloc(secp256k1_scratch* scratch, size_t size) {
     void *ret;
-    size_t frame = scratch->frame - 1;
     size = ((size + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-
-    if (scratch->frame == 0 || size + scratch->offset[frame] > scratch->frame_size[frame]) {
+    if (size + scratch->offset > scratch->init_size) {
         return NULL;
     }
-    ret = (void *) ((unsigned char *) scratch->data[frame] + scratch->offset[frame]);
+    ret = (void *) ((unsigned char *) scratch->data + scratch->offset);
     memset(ret, 0, size);
-    scratch->offset[frame] += size;
-
+    scratch->offset += size;
     return ret;
+}
+
+static void secp256k1_scratch_reset(secp256k1_scratch* scratch) {
+    scratch->offset = 0;
 }
 
 #endif
